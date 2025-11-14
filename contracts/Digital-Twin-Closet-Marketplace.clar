@@ -15,6 +15,10 @@
 (define-constant err-invalid-price (err u111))
 (define-constant err-listing-not-found (err u112))
 (define-constant err-listing-exists (err u113))
+(define-constant err-offer-not-found (err u114))
+(define-constant err-offer-exists (err u115))
+(define-constant err-not-offer-maker (err u116))
+(define-constant err-invalid-offer (err u117))
 
 (define-data-var last-token-id uint u0)
 (define-data-var platform-fee-percentage uint u250)
@@ -53,6 +57,15 @@
   }
 )
 
+(define-map offers
+  {token-id: uint, offerer: principal}
+  {
+    amount: uint,
+    created-at: uint,
+    expires-at: uint
+  }
+)
+
 (define-private (is-contract-owner)
   (is-eq tx-sender contract-owner)
 )
@@ -83,6 +96,10 @@
 
 (define-read-only (get-platform-fee-percentage)
   (ok (var-get platform-fee-percentage))
+)
+
+(define-read-only (get-offer (token-id uint) (offerer principal))
+  (ok (map-get? offers {token-id: token-id, offerer: offerer}))
 )
 
 (define-public (mint-digital-twin 
@@ -257,6 +274,65 @@
     (map-delete marketplace-listings token-id)
     (map-delete token-metadata token-id)
     (try! (nft-burn? digital-twin-nft token-id token-owner))
+    (ok true)
+  )
+)
+
+(define-public (make-offer (token-id uint) (offer-amount uint) (duration-blocks uint))
+  (let
+    (
+      (listing (unwrap! (map-get? marketplace-listings token-id) err-listing-not-found))
+      (current-block stacks-block-height)
+      (expires-at (+ current-block duration-blocks))
+      (offer-key {token-id: token-id, offerer: tx-sender})
+    )
+    (asserts! (> offer-amount u0) err-invalid-offer)
+    (asserts! (> duration-blocks u0) err-invalid-offer)
+    (asserts! (not (is-eq tx-sender (get seller listing))) err-not-buyer)
+    (asserts! (is-none (map-get? offers offer-key)) err-offer-exists)
+    (try! (stx-transfer? offer-amount tx-sender (as-contract tx-sender)))
+    (map-set offers offer-key {
+      amount: offer-amount,
+      created-at: current-block,
+      expires-at: expires-at
+    })
+    (ok true)
+  )
+)
+
+(define-public (cancel-offer (token-id uint))
+  (let
+    (
+      (offer-key {token-id: token-id, offerer: tx-sender})
+      (offer (unwrap! (map-get? offers offer-key) err-offer-not-found))
+      (offer-amount (get amount offer))
+    )
+    (try! (as-contract (stx-transfer? offer-amount tx-sender tx-sender)))
+    (map-delete offers offer-key)
+    (ok true)
+  )
+)
+
+(define-public (accept-offer (token-id uint) (offerer principal))
+  (let
+    (
+      (listing (unwrap! (map-get? marketplace-listings token-id) err-listing-not-found))
+      (token-owner (unwrap! (nft-get-owner? digital-twin-nft token-id) err-token-not-found))
+      (offer-key {token-id: token-id, offerer: offerer})
+      (offer (unwrap! (map-get? offers offer-key) err-offer-not-found))
+      (offer-amount (get amount offer))
+      (current-block stacks-block-height)
+      (platform-fee (/ (* offer-amount (var-get platform-fee-percentage)) u10000))
+      (seller-amount (- offer-amount platform-fee))
+    )
+    (asserts! (is-eq tx-sender (get seller listing)) err-not-seller)
+    (asserts! (is-eq tx-sender token-owner) err-not-token-owner)
+    (asserts! (< current-block (get expires-at offer)) err-invalid-offer)
+    (try! (as-contract (stx-transfer? seller-amount tx-sender tx-sender)))
+    (try! (as-contract (stx-transfer? platform-fee tx-sender contract-owner)))
+    (try! (nft-transfer? digital-twin-nft token-id token-owner offerer))
+    (map-delete marketplace-listings token-id)
+    (map-delete offers offer-key)
     (ok true)
   )
 )
